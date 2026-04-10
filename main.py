@@ -1,6 +1,6 @@
 import requests
 from datetime import datetime
-from supabase import create_client, Client
+from supabase import create_client
 import os
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
@@ -8,47 +8,62 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-TABLE_NAME = "steam_games"
-APP_IDS = [730, 570, 440, 578080]
+# ------------------------
+# GET ALL STEAM APPS
+# ------------------------
+def get_app_list():
+    url = "https://api.steampowered.com/ISteamApps/GetAppList/v2/"
+    return requests.get(url).json()["applist"]["apps"]
 
-def get_current_players(app_id):
+# ------------------------
+# GET PLAYER COUNT
+# ------------------------
+def get_players(app_id):
     url = f"https://api.steampowered.com/ISteamUserStats/GetNumberOfCurrentPlayers/v1/?appid={app_id}"
-    r = requests.get(url)
-    return r.json().get("response", {}).get("player_count")
+    return requests.get(url).json().get("response", {}).get("player_count")
 
-def get_game_data(app_id):
+# ------------------------
+# BASIC FILTER (removes junk apps)
+# ------------------------
+def is_valid(app_id):
     url = f"https://store.steampowered.com/api/appdetails?appids={app_id}"
-    r = requests.get(url)
-    data = r.json()
+    r = requests.get(url).json()
+    return r.get(str(app_id), {}).get("success", False)
 
-    if not data[str(app_id)]["success"]:
-        return None
+apps = get_app_list()
 
-    game = data[str(app_id)]["data"]
+print("Total apps:", len(apps))
 
-    genres = game.get("genres")
-    genres_clean = ",".join([g["description"] for g in genres]) if genres else None
+count = 0
 
-    return {
-        "app_id": app_id,
-        "name": game.get("name"),
-        "release_date": game.get("release_date", {}).get("date"),
-        "genres": genres_clean,
-        "current_players": get_current_players(app_id),
-        "last_updated": datetime.utcnow().isoformat()
-    }
+for app in apps[:200]:  # start small so it doesn't break
+    app_id = app["appid"]
+    name = app["name"]
 
-all_data = []
-
-for app_id in APP_IDS:
     try:
-        game = get_game_data(app_id)
-        if game:
-            all_data.append(game)
-            print(game["name"], game["current_players"])
+        if not is_valid(app_id):
+            continue
+
+        players = get_players(app_id)
+
+        print(name, players)
+
+        supabase.table("steam_games").upsert({
+            "app_id": app_id,
+            "name": name,
+            "last_updated": datetime.utcnow().isoformat()
+        }).execute()
+
+        supabase.table("steam_player_history").insert({
+            "app_id": app_id,
+            "name": name,
+            "current_players": players,
+            "recorded_at": datetime.utcnow().isoformat()
+        }).execute()
+
+        count += 1
+
     except Exception as e:
         print("Error:", app_id, e)
 
-if all_data:
-    supabase.table(TABLE_NAME).upsert(all_data).execute()
-    print("Updated Supabase:", len(all_data))
+print("DONE:", count)
