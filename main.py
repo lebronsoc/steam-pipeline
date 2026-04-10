@@ -1,59 +1,107 @@
+import os
 import requests
 from datetime import datetime
 from supabase import create_client
-import os
 
+# ------------------------
+# SUPABASE SETUP
+# ------------------------
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ------------------------
-# GET ALL STEAM APPS
+# GET STEAM APP LIST (SAFE)
 # ------------------------
 def get_app_list():
     url = "https://api.steampowered.com/ISteamApps/GetAppList/v2/"
-    return requests.get(url).json()["applist"]["apps"]
+
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    try:
+        r = requests.get(url, headers=headers, timeout=30)
+
+        print("Steam status:", r.status_code)
+
+        if r.status_code != 200:
+            print("Steam API failed:", r.text[:200])
+            return []
+
+        data = r.json()
+        return data.get("applist", {}).get("apps", [])
+
+    except Exception as e:
+        print("Error fetching app list:", e)
+        return []
 
 # ------------------------
 # GET PLAYER COUNT
 # ------------------------
 def get_players(app_id):
     url = f"https://api.steampowered.com/ISteamUserStats/GetNumberOfCurrentPlayers/v1/?appid={app_id}"
-    return requests.get(url).json().get("response", {}).get("player_count")
+
+    try:
+        r = requests.get(url, timeout=15)
+        data = r.json()
+        return data.get("response", {}).get("player_count")
+    except:
+        return None
 
 # ------------------------
-# BASIC FILTER (removes junk apps)
+# VALIDATE GAME
 # ------------------------
-def is_valid(app_id):
+def is_valid_game(app_id):
     url = f"https://store.steampowered.com/api/appdetails?appids={app_id}"
-    r = requests.get(url).json()
-    return r.get(str(app_id), {}).get("success", False)
 
+    try:
+        r = requests.get(url, timeout=15)
+        data = r.json()
+        return data.get(str(app_id), {}).get("success", False)
+    except:
+        return False
+
+# ------------------------
+# MAIN PIPELINE
+# ------------------------
 apps = get_app_list()
 
-print("Total apps:", len(apps))
+print("Total apps fetched:", len(apps))
 
 count = 0
 
-for app in apps[:200]:  # start small so it doesn't break
-    app_id = app["appid"]
-    name = app["name"]
+# limit for safety
+for app in apps[:200]:
+
+    app_id = app.get("appid")
+    name = app.get("name")
+
+    if not app_id or not name:
+        continue
 
     try:
-        if not is_valid(app_id):
+        # filter real games
+        if not is_valid_game(app_id):
             continue
 
         players = get_players(app_id)
 
-        print(name, players)
+        print(name, "->", players)
 
+        # ------------------------
+        # UPSERT GAME
+        # ------------------------
         supabase.table("steam_games").upsert({
             "app_id": app_id,
             "name": name,
             "last_updated": datetime.utcnow().isoformat()
         }).execute()
 
+        # ------------------------
+        # INSERT HISTORY
+        # ------------------------
         supabase.table("steam_player_history").insert({
             "app_id": app_id,
             "name": name,
@@ -64,6 +112,6 @@ for app in apps[:200]:  # start small so it doesn't break
         count += 1
 
     except Exception as e:
-        print("Error:", app_id, e)
+        print("Error processing", app_id, ":", e)
 
-print("DONE:", count)
+print("DONE. Processed:", count)
