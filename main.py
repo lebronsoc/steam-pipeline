@@ -12,29 +12,45 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ------------------------
-# GET STEAM APP LIST (SAFE)
+# GET APP LIST (STABLE + FALLBACK)
 # ------------------------
 def get_app_list():
-    url = "https://api.steampowered.com/ISteamApps/GetAppList/v2/"
+    headers = {"User-Agent": "Mozilla/5.0"}
 
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
+    # ---- Primary Steam endpoint ----
+    url = "https://api.steampowered.com/ISteamApps/GetAppList/v2/"
 
     try:
         r = requests.get(url, headers=headers, timeout=30)
+        print("Steam AppList status:", r.status_code)
 
-        print("Steam status:", r.status_code)
+        if r.status_code == 200:
+            data = r.json()
+            return data.get("applist", {}).get("apps", [])
 
-        if r.status_code != 200:
-            print("Steam API failed:", r.text[:200])
-            return []
-
-        data = r.json()
-        return data.get("applist", {}).get("apps", [])
+        print("Primary failed, switching fallback...")
 
     except Exception as e:
-        print("Error fetching app list:", e)
+        print("Primary error:", e)
+
+    # ---- Fallback (SteamSpy mirror) ----
+    try:
+        fallback_url = "https://steamspy.com/api.php?request=all"
+        r = requests.get(fallback_url, timeout=30)
+
+        print("Fallback status:", r.status_code)
+
+        data = r.json()
+
+        # Convert SteamSpy format → same structure
+        return [
+            {"appid": int(k), "name": v.get("name", "Unknown")}
+            for k, v in data.items()
+            if k.isdigit()
+        ]
+
+    except Exception as e:
+        print("Fallback failed:", e)
         return []
 
 # ------------------------
@@ -68,12 +84,15 @@ def is_valid_game(app_id):
 # ------------------------
 apps = get_app_list()
 
-print("Total apps fetched:", len(apps))
+print("Total apps loaded:", len(apps))
+
+if not apps:
+    print("No apps fetched. Exiting.")
+    exit()
 
 count = 0
 
-# limit for safety
-for app in apps[:200]:
+for app in apps[:200]:  # keep safe for GitHub Actions
 
     app_id = app.get("appid")
     name = app.get("name")
@@ -82,7 +101,6 @@ for app in apps[:200]:
         continue
 
     try:
-        # filter real games
         if not is_valid_game(app_id):
             continue
 
@@ -91,7 +109,7 @@ for app in apps[:200]:
         print(name, "->", players)
 
         # ------------------------
-        # UPSERT GAME
+        # UPSERT MASTER TABLE
         # ------------------------
         supabase.table("steam_games").upsert({
             "app_id": app_id,
@@ -100,7 +118,7 @@ for app in apps[:200]:
         }).execute()
 
         # ------------------------
-        # INSERT HISTORY
+        # INSERT HISTORY TABLE
         # ------------------------
         supabase.table("steam_player_history").insert({
             "app_id": app_id,
@@ -112,6 +130,6 @@ for app in apps[:200]:
         count += 1
 
     except Exception as e:
-        print("Error processing", app_id, ":", e)
+        print("Error:", app_id, e)
 
-print("DONE. Processed:", count)
+print("DONE:", count)
